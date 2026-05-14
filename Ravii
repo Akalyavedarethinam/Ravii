@@ -1,0 +1,384 @@
+import { useState, useCallback, useRef } from "react";
+import * as XLSX from "xlsx";
+import {
+  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
+} from "recharts";
+
+const PALETTE = ["#6366f1", "#f59e0b", "#10b981", "#ef4444", "#3b82f6", "#ec4899", "#14b8a6", "#f97316"];
+
+function inferColumnType(values) {
+  const nonNull = values.filter(v => v !== null && v !== undefined && v !== "");
+  if (nonNull.length === 0) return "empty";
+  const numCount = nonNull.filter(v => typeof v === "number" || (!isNaN(Number(v)) && v !== "")).length;
+  if (numCount / nonNull.length > 0.7) return "numeric";
+  return "categorical";
+}
+
+function getStats(values) {
+  const nums = values.filter(v => typeof v === "number" || (!isNaN(Number(v)) && v !== "")).map(Number);
+  if (!nums.length) return null;
+  const sum = nums.reduce((a, b) => a + b, 0);
+  const avg = sum / nums.length;
+  const min = Math.min(...nums);
+  const max = Math.max(...nums);
+  return { sum, avg, min, max, count: nums.length };
+}
+
+function getFrequency(values) {
+  const freq = {};
+  values.forEach(v => {
+    if (v !== null && v !== undefined && v !== "") {
+      const key = String(v);
+      freq[key] = (freq[key] || 0) + 1;
+    }
+  });
+  return Object.entries(freq)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([name, value]) => ({ name, value }));
+}
+
+function StatCard({ label, value, color, sub }) {
+  return (
+    <div style={{
+      background: "#1e1e2e",
+      border: `1px solid ${color}33`,
+      borderRadius: 14,
+      padding: "18px 22px",
+      flex: "1 1 150px",
+      minWidth: 140,
+    }}>
+      <div style={{ fontSize: 11, fontFamily: "'Space Mono', monospace", color: "#888", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{label}</div>
+      <div style={{ fontSize: 26, fontWeight: 700, fontFamily: "'DM Sans', sans-serif", color }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: "#666", marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function ChartCard({ title, children }) {
+  return (
+    <div style={{
+      background: "#1e1e2e",
+      border: "1px solid #2a2a3e",
+      borderRadius: 16,
+      padding: "20px 24px",
+      marginBottom: 20,
+    }}>
+      <div style={{ fontSize: 13, fontFamily: "'Space Mono', monospace", color: "#888", marginBottom: 16, textTransform: "uppercase", letterSpacing: 1 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+export default function App() {
+  const [data, setData] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef();
+
+  const processFile = useCallback((file) => {
+    if (!file) return;
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const wb = XLSX.read(e.target.result, { type: "array" });
+      const sheetName = wb.SheetNames[0];
+      const ws = wb.Sheets[sheetName];
+      const raw = XLSX.utils.sheet_to_json(ws, { defval: null });
+      if (!raw.length) return;
+
+      const columns = Object.keys(raw[0]);
+      const colMeta = columns.map(col => {
+        const values = raw.map(r => r[col]);
+        const type = inferColumnType(values);
+        return { col, type, values };
+      });
+
+      setData({ rows: raw, columns, colMeta, sheetName });
+    };
+    reader.readAsArrayBuffer(file);
+  }, []);
+
+  const onDrop = useCallback((e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file) processFile(file);
+  }, [processFile]);
+
+  const onFileChange = (e) => {
+    if (e.target.files[0]) processFile(e.target.files[0]);
+  };
+
+  const numericCols = data?.colMeta.filter(c => c.type === "numeric") || [];
+  const categoricalCols = data?.colMeta.filter(c => c.type === "categorical") || [];
+
+  // Pick best bar chart: first categorical + first numeric
+  const barCatCol = categoricalCols[0];
+  const barNumCol = numericCols[0];
+  let barData = [];
+  if (barCatCol && barNumCol && data) {
+    const grouped = {};
+    data.rows.forEach(r => {
+      const key = String(r[barCatCol.col] ?? "Unknown");
+      const val = Number(r[barNumCol.col]) || 0;
+      grouped[key] = (grouped[key] || 0) + val;
+    });
+    barData = Object.entries(grouped)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 12)
+      .map(([name, value]) => ({ name, value }));
+  }
+
+  // Line chart: numeric cols over row index (up to 50 rows)
+  const lineCols = numericCols.slice(0, 3);
+  let lineData = [];
+  if (data && lineCols.length) {
+    lineData = data.rows.slice(0, 50).map((r, i) => {
+      const obj = { index: i + 1 };
+      lineCols.forEach(c => { obj[c.col] = Number(r[c.col]) || 0; });
+      return obj;
+    });
+  }
+
+  // Pie chart: first categorical col
+  const pieCatCol = categoricalCols[1] || categoricalCols[0];
+  let pieData = [];
+  if (pieCatCol) {
+    pieData = getFrequency(pieCatCol.values).slice(0, 6);
+  }
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "#13131f",
+      color: "#e2e2f0",
+      fontFamily: "'DM Sans', sans-serif",
+      padding: "0 0 60px 0",
+    }}>
+      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+
+      {/* Header */}
+      <div style={{
+        background: "linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)",
+        borderBottom: "1px solid #2a2a4a",
+        padding: "22px 36px",
+        display: "flex", alignItems: "center", gap: 16,
+      }}>
+        <div style={{
+          width: 38, height: 38, borderRadius: 10,
+          background: "linear-gradient(135deg, #6366f1, #818cf8)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 18,
+        }}>📊</div>
+        <div>
+          <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.3px" }}>Excel → Dashboard</div>
+          <div style={{ fontSize: 12, color: "#666", fontFamily: "'Space Mono', monospace" }}>
+            {data ? `${fileName} · ${data.rows.length} rows · ${data.columns.length} columns` : "Drop any .xlsx or .csv file to visualize instantly"}
+          </div>
+        </div>
+        {data && (
+          <button onClick={() => { setData(null); setFileName(""); }}
+            style={{
+              marginLeft: "auto", background: "transparent", border: "1px solid #333",
+              color: "#888", borderRadius: 8, padding: "6px 14px", cursor: "pointer",
+              fontSize: 12, fontFamily: "'Space Mono', monospace",
+            }}>
+            ✕ Clear
+          </button>
+        )}
+      </div>
+
+      <div style={{ maxWidth: 1100, margin: "0 auto", padding: "30px 24px" }}>
+
+        {/* Upload zone */}
+        {!data && (
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={onDrop}
+            onClick={() => inputRef.current.click()}
+            style={{
+              border: `2px dashed ${dragOver ? "#6366f1" : "#2a2a4a"}`,
+              borderRadius: 20,
+              padding: "70px 40px",
+              textAlign: "center",
+              cursor: "pointer",
+              background: dragOver ? "#1a1a3a" : "#16161f",
+              transition: "all 0.2s",
+            }}>
+            <div style={{ fontSize: 48, marginBottom: 16 }}>📂</div>
+            <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Drop your Excel or CSV file here</div>
+            <div style={{ fontSize: 13, color: "#555", fontFamily: "'Space Mono', monospace" }}>
+              .xlsx · .xls · .csv · .tsv — click or drag to upload
+            </div>
+            <input ref={inputRef} type="file" accept=".xlsx,.xls,.csv,.tsv" style={{ display: "none" }} onChange={onFileChange} />
+          </div>
+        )}
+
+        {/* Dashboard */}
+        {data && (
+          <>
+            {/* KPI Row */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 24 }}>
+              <StatCard label="Total Rows" value={data.rows.length.toLocaleString()} color="#6366f1" />
+              <StatCard label="Columns" value={data.columns.length} color="#f59e0b" />
+              <StatCard label="Numeric Cols" value={numericCols.length} color="#10b981" />
+              <StatCard label="Category Cols" value={categoricalCols.length} color="#ec4899" />
+              {numericCols[0] && (() => {
+                const s = getStats(numericCols[0].values);
+                return s ? (
+                  <StatCard
+                    label={`Sum · ${numericCols[0].col}`}
+                    value={s.sum > 1e6 ? (s.sum / 1e6).toFixed(1) + "M" : s.sum.toLocaleString(undefined, { maximumFractionDigits: 1 })}
+                    color="#3b82f6"
+                    sub={`avg ${s.avg.toFixed(1)}`}
+                  />
+                ) : null;
+              })()}
+            </div>
+
+            {/* Numeric summary */}
+            {numericCols.length > 0 && (
+              <ChartCard title="Numeric Column Summary">
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: "1px solid #2a2a3e" }}>
+                        {["Column", "Count", "Sum", "Average", "Min", "Max"].map(h => (
+                          <th key={h} style={{ textAlign: "left", padding: "8px 12px", color: "#666", fontFamily: "'Space Mono', monospace", fontSize: 11, fontWeight: 400 }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {numericCols.map((c, i) => {
+                        const s = getStats(c.values);
+                        if (!s) return null;
+                        const fmt = n => n > 1e6 ? (n / 1e6).toFixed(2) + "M" : n > 1e3 ? (n / 1e3).toFixed(1) + "K" : n.toFixed(2);
+                        return (
+                          <tr key={c.col} style={{ borderBottom: "1px solid #1e1e2e" }}>
+                            <td style={{ padding: "10px 12px", color: PALETTE[i % PALETTE.length], fontWeight: 600 }}>{c.col}</td>
+                            <td style={{ padding: "10px 12px", color: "#ccc" }}>{s.count}</td>
+                            <td style={{ padding: "10px 12px", color: "#ccc" }}>{fmt(s.sum)}</td>
+                            <td style={{ padding: "10px 12px", color: "#ccc" }}>{fmt(s.avg)}</td>
+                            <td style={{ padding: "10px 12px", color: "#ccc" }}>{fmt(s.min)}</td>
+                            <td style={{ padding: "10px 12px", color: "#ccc" }}>{fmt(s.max)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </ChartCard>
+            )}
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))", gap: 20, marginBottom: 20 }}>
+
+              {/* Bar chart */}
+              {barData.length > 0 && (
+                <ChartCard title={`${barNumCol.col} by ${barCatCol.col}`}>
+                  <ResponsiveContainer width="100%" height={260}>
+                    <BarChart data={barData} margin={{ top: 0, right: 10, left: 0, bottom: 60 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#2a2a3e" />
+                      <XAxis dataKey="name" tick={{ fill: "#666", fontSize: 11 }} angle={-35} textAnchor="end" interval={0} />
+                      <YAxis tick={{ fill: "#666", fontSize: 11 }} />
+                      <Tooltip contentStyle={{ background: "#1a1a2e", border: "1px solid #333", borderRadius: 8, fontSize: 12 }} />
+                      <Bar dataKey="value" radius={[6, 6, 0, 0]}>
+                        {barData.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </ChartCard>
+              )}
+
+              {/* Pie chart */}
+              {pieData.length > 1 && (
+                <ChartCard title={`Distribution · ${pieCatCol.col}`}>
+                  <ResponsiveContainer width="100%" height={260}>
+                    <PieChart>
+                      <Pie data={pieData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={90} label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                        labelLine={{ stroke: "#444" }}>
+                        {pieData.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]} />)}
+                      </Pie>
+                      <Tooltip contentStyle={{ background: "#1a1a2e", border: "1px solid #333", borderRadius: 8, fontSize: 12 }} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </ChartCard>
+              )}
+            </div>
+
+            {/* Line chart */}
+            {lineData.length > 2 && lineCols.length > 0 && (
+              <ChartCard title={`Trend · ${lineCols.map(c => c.col).join(", ")} (first ${lineData.length} rows)`}>
+                <ResponsiveContainer width="100%" height={260}>
+                  <LineChart data={lineData} margin={{ top: 0, right: 20, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#2a2a3e" />
+                    <XAxis dataKey="index" tick={{ fill: "#666", fontSize: 11 }} />
+                    <YAxis tick={{ fill: "#666", fontSize: 11 }} />
+                    <Tooltip contentStyle={{ background: "#1a1a2e", border: "1px solid #333", borderRadius: 8, fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 12, color: "#888" }} />
+                    {lineCols.map((c, i) => (
+                      <Line key={c.col} type="monotone" dataKey={c.col} stroke={PALETTE[i]} strokeWidth={2} dot={false} />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </ChartCard>
+            )}
+
+            {/* Category freq tables */}
+            {categoricalCols.length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 20 }}>
+                {categoricalCols.slice(0, 4).map((c, ci) => {
+                  const freq = getFrequency(c.values);
+                  const max = freq[0]?.value || 1;
+                  return (
+                    <ChartCard key={c.col} title={`Top Values · ${c.col}`}>
+                      {freq.map((f, i) => (
+                        <div key={f.name} style={{ marginBottom: 8 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 3 }}>
+                            <span style={{ color: "#ccc", maxWidth: "70%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
+                            <span style={{ color: "#666", fontFamily: "'Space Mono', monospace" }}>{f.value}</span>
+                          </div>
+                          <div style={{ height: 5, background: "#2a2a3e", borderRadius: 3 }}>
+                            <div style={{ width: `${(f.value / max) * 100}%`, height: "100%", background: PALETTE[(ci + i) % PALETTE.length], borderRadius: 3, transition: "width 0.5s" }} />
+                          </div>
+                        </div>
+                      ))}
+                    </ChartCard>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Data preview */}
+            <ChartCard title={`Data Preview · ${data.sheetName} (first 10 rows)`}>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid #2a2a3e" }}>
+                      {data.columns.map(col => (
+                        <th key={col} style={{ padding: "8px 12px", textAlign: "left", color: "#666", fontFamily: "'Space Mono', monospace", fontSize: 10, fontWeight: 400, whiteSpace: "nowrap" }}>{col}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.rows.slice(0, 10).map((row, i) => (
+                      <tr key={i} style={{ borderBottom: "1px solid #1e1e2e" }}>
+                        {data.columns.map(col => (
+                          <td key={col} style={{ padding: "9px 12px", color: "#ccc", whiteSpace: "nowrap", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {row[col] ?? <span style={{ color: "#444" }}>—</span>}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </ChartCard>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
